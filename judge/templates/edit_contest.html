@@ -1,0 +1,10 @@
+{% extends 'base.html' %}{% block content %}
+<h2>Редактирование контеста</h2>
+<p class="muted">Настройки можно менять до, во время и после контеста. Изменение времени сразу влияет на доступ к задачам, приём решений и попадание посылок в таблицу результатов.</p>
+<form method="post" class="panel"><input type="hidden" name="csrf" value="{{ session.csrf }}">
+<label>Название<input name="title" value="{{ request.form.get('title', contest.title) }}" maxlength="200" required></label>
+<label>Начало (UTC)<input type="datetime-local" step="1" name="starts_at" value="{{ request.form.get('starts_at', start_value) }}"></label>
+<p>Пустое начало — бессрочная тренировка.</p>
+<label>Длительность, минуты<input type="number" name="duration" min="1" max="10080" value="{{ request.form.get('duration', contest.duration_minutes) }}" required></label>
+<button type="submit">Сохранить</button></form>
+{% endblock %}

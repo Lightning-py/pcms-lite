@@ -196,6 +196,80 @@ class SystemTest(unittest.TestCase):
         self.assertEqual(len(fake.calls), 4)
         self.assertEqual(self.con.execute("SELECT count(*) FROM test_results").fetchone()[0], 1)
 
+    def test_append_contest_with_colliding_labels_keeps_existing_problems(self):
+        cid = self.load(contest_zip())
+        old = [tuple(r) for r in self.con.execute('SELECT id,label,package_dir FROM problems ORDER BY id')]
+        self.load(contest_zip(), contest_id=cid)
+        rows = self.con.execute('SELECT id,label,package_dir FROM problems ORDER BY id').fetchall()
+        self.assertEqual([r['label'] for r in rows], ['A','B','C','D'])
+        self.assertEqual([tuple(r) for r in rows[:2]], old)
+
+    def test_edit_contest_permissions_and_schedule_changes(self):
+        cid = self.load(starts_at=time.time()-10000, duration=1)
+        self.login()
+        path = f'/contests/{cid}/edit'
+        self.assertEqual(self.client.get(path).status_code,403)
+        self.assertEqual(self.post(path, {'title':'Bad','duration':'10'}).status_code,403)
+        self.login('admin')
+        self.assertEqual(self.client.get(path).status_code,200)
+        self.assertEqual(self.client.post(path,data={'title':'No csrf'}).status_code,400)
+        self.assertEqual(self.post(path, {'title':'Renamed','starts_at':'','duration':'60'}).status_code,302)
+        c = self.con.execute('SELECT * FROM contests').fetchone()
+        self.assertEqual((c['title'], c['starts_at'], c['duration_minutes']),('Renamed',None,60))
+        self.post(path, {'title':'Invalid','duration':'0'})
+        self.assertEqual(self.con.execute('SELECT title FROM contests').fetchone()[0],'Renamed')
+        self.post(path, {'title':'Future','starts_at':'2099-01-01T12:00','duration':'60'})
+        self.login()
+        self.assertEqual(self.client.get('/problems/1').status_code,403)
+
+    def test_moderation_survives_worker_result_and_updates_standings(self):
+        cid = self.load()
+        with self.con:
+            self.con.execute("INSERT INTO submissions(user_id,problem_id,language,source,created_at,verdict) VALUES(?,1,'python','print(0)',?,'RUNNING')", (self.uid,time.time()))
+        path = '/submissions/1/moderate'
+        self.login()
+        self.assertEqual(self.post(path, {'action':'accept','reason':'x'}).status_code,403)
+        self.login('admin')
+        self.assertEqual(self.client.post(path,data={'action':'accept'}).status_code,400)
+        self.assertEqual(self.post(path, {'action':'accept','reason':''}).status_code,400)
+        self.assertEqual(self.post(path, {'action':'accept','reason':'Manual review'}).status_code,302)
+        self.assertEqual(self.client.get('/api/submissions/1').json['verdict'],'AC')
+        c = self.con.execute('SELECT * FROM contests').fetchone()
+        self.assertEqual(standings(self.con,c)[1][0]['solved'],1)
+        self.post(path, {'action':'ban','reason':'Invalid submission'})
+        # The worker finishes after the administrator's action.
+        with self.con:
+            self.con.execute("UPDATE submissions SET verdict='AC' WHERE id=1")
+        self.assertEqual(self.client.get('/api/submissions/1').json['verdict'],'BAN')
+        self.assertEqual(standings(self.con,c)[1][0]['solved'],0)
+        self.assertEqual(standings(self.con,c)[1][0]['penalty'],0)
+        self.assertEqual(self.client.get('/submissions/1').status_code,200)
+        self.assertEqual(self.client.get(f'/contests/{cid}/submissions').status_code,200)
+        self.post(path, {'action':'restore','reason':'Restored'})
+        self.assertEqual(self.client.get('/api/submissions/1').json['verdict'],'AC')
+        self.assertEqual(self.con.execute('SELECT count(*) FROM moderation_log').fetchone()[0],3)
+        self.login()
+        self.assertIn(b'Restored', self.client.get('/submissions/1').data)
+
+    def test_manual_accept_gives_full_points_and_rejudge_preserves_ban(self):
+        cid = self.load()
+        p = self.con.execute('SELECT * FROM problems').fetchone()
+        manifest = json.loads(p['manifest'])
+        manifest.update(scoring='points',max_score=75)
+        with self.con:
+            self.con.execute('UPDATE problems SET manifest=?',(json.dumps(manifest),))
+            self.con.execute("INSERT INTO submissions(user_id,problem_id,language,source,created_at,verdict,score) VALUES(?,1,'python','print(0)',?,'WA',10)", (self.uid,time.time()))
+        self.login('admin')
+        self.post('/submissions/1/moderate', {'action':'accept','reason':'Accepted'})
+        c=self.con.execute('SELECT * FROM contests').fetchone()
+        self.assertEqual(standings(self.con,c)[1][0]['score'],75)
+        self.post('/submissions/1/moderate', {'action':'ban','reason':'Banned'})
+        self.assertEqual(standings(self.con,c)[1][0]['score'],0)
+        self.post('/submissions/1/rejudge')
+        self.assertEqual(self.client.get('/api/submissions/1').json['verdict'],'BAN')
+        self.post('/submissions/1/moderate', {'action':'restore','reason':'Return to judging'})
+        self.assertEqual(self.client.get('/api/submissions/1').json['verdict'],'QUEUED')
+
     def test_sandbox_metadata_and_unsafe_output(self):
         self.assertEqual(verdict_from_meta({"status": "TO"}), "TLE")
         self.assertEqual(verdict_from_meta({"status": "SG", "cg-oom-killed": "1"}), "MLE")

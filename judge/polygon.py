@@ -261,17 +261,21 @@ def import_archive(con, data, archive, contest_id=None, title="Импорт Poly
                 raise ImportError("Контест не найден")
             else:
                 existing = {r[0] for r in con.execute("SELECT label FROM problems WHERE contest_id=?", (contest_id,))}
-                if not descriptors:
-                    offset = 0
-                    relabeled = []
-                    for _, p, m in ordered:
-                        while letter(offset) in existing:
+                # Reserve non-conflicting imported labels before assigning replacements.
+                used = {label.upper() for label in existing}
+                reserved = used | {label.upper() for label, _, _ in ordered}
+                relabeled = []
+                offset = 0
+                for label, p, m in ordered:
+                    if not descriptors or label.upper() in used:
+                        blocked = reserved if descriptors else used
+                        while letter(offset) in blocked:
                             offset += 1
-                        relabeled.append((letter(offset), p, m))
-                        offset += 1
-                    ordered = relabeled
-                elif existing.intersection(labels):
-                    raise ImportError("Обозначения задач уже заняты в контесте")
+                        label = letter(offset)
+                        reserved.add(label.upper())
+                    used.add(label.upper())
+                    relabeled.append((label, p, m))
+                ordered = relabeled
             for label, root, manifest in ordered:
                 key = uuid.uuid4().hex
                 dest = data / "packages" / key

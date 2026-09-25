@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS test_results (
  time_ms INTEGER NOT NULL, memory_kb INTEGER NOT NULL,
  PRIMARY KEY(submission_id, number)
 );
+CREATE TABLE IF NOT EXISTS moderation_log (
+ id INTEGER PRIMARY KEY, submission_id INTEGER NOT NULL REFERENCES submissions(id),
+ admin_id INTEGER NOT NULL REFERENCES users(id), action TEXT NOT NULL,
+ reason TEXT NOT NULL, created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS imports (
  id INTEGER PRIMARY KEY, archive TEXT NOT NULL, options TEXT NOT NULL,
  status TEXT NOT NULL DEFAULT 'QUEUED', claimed_by INTEGER,
@@ -69,6 +74,10 @@ def initialize(root=None):
         con.executescript(SCHEMA)
         if 'score' not in {r[1] for r in con.execute('PRAGMA table_info(submissions)')}:
             con.execute('ALTER TABLE submissions ADD COLUMN score REAL')
+        columns = {r[1] for r in con.execute('PRAGMA table_info(submissions)')}
+        for name, kind in [('manual_verdict', 'TEXT'), ('manual_score', 'REAL')]:
+            if name not in columns:
+                con.execute(f'ALTER TABLE submissions ADD COLUMN {name} {kind}')
 
 
 def add_user(con, username, password, admin=False):
@@ -99,11 +108,21 @@ def claim(con, worker_id):
     return row
 
 
+def effective_submission(row):
+    result = dict(row)
+    result['automatic_verdict'] = result['verdict']
+    if result.get('manual_verdict'):
+        result['verdict'] = result['manual_verdict']
+        result['score'] = result['manual_score']
+    return result
+
+
 def standings(con, contest):
     problems = con.execute("SELECT * FROM problems WHERE contest_id=? ORDER BY id", (contest["id"],)).fetchall()
     rows = con.execute("""SELECT s.*, u.username FROM submissions s
         JOIN users u ON u.id=s.user_id JOIN problems p ON p.id=s.problem_id
         WHERE p.contest_id=? AND u.is_admin=0 ORDER BY s.created_at,s.id""", (contest["id"],)).fetchall()
+    rows = [effective_submission(row) for row in rows]
     scored = any(json.loads(p['manifest']).get('scoring') == 'points' for p in problems)
     if scored:
         people = {}

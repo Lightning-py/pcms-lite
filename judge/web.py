@@ -10,7 +10,7 @@ from pathlib import Path
 from flask import Flask, abort, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from .db import add_user, connect, contest_open, data_dir, standings
+from .db import add_user, connect, contest_open, data_dir, standings, effective_submission
 from .polygon import ImportError
 from .imports import enqueue_import
 from .sandbox import LANGUAGES
@@ -92,7 +92,7 @@ def create_app(config=None):
             abort(404)
         if s["user_id"] != g.user["id"] and not g.user["is_admin"]:
             abort(403)
-        return s
+        return effective_submission(s)
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -134,8 +134,51 @@ def create_app(config=None):
         c = get_contest(cid)
         visible = c["starts_at"] is None or c["starts_at"] <= time.time() or g.user["is_admin"]
         problems = g.db.execute("SELECT * FROM problems WHERE contest_id=? ORDER BY id", (cid,)).fetchall() if visible else []
-        solved = {r[0] for r in g.db.execute("SELECT DISTINCT problem_id FROM submissions WHERE user_id=? AND verdict='AC'", (g.user["id"],))}
+        solved = {r[0] for r in g.db.execute("SELECT DISTINCT problem_id FROM submissions WHERE user_id=? AND COALESCE(manual_verdict,verdict)='AC'", (g.user["id"],))}
         return render_template("contest.html", contest=c, problems=problems, solved=solved, visible=visible, tab="problems")
+
+    @app.route("/contests/<int:cid>/edit", methods=["GET", "POST"])
+    def edit_contest(cid):
+        admin_only()
+        c = get_contest(cid)
+        if request.method == "POST":
+            try:
+                title = request.form.get('title', '').strip()
+                if not title or len(title) > 200:
+                    raise ValueError('Название: от 1 до 200 символов')
+                start = request.form.get('starts_at', '').strip()
+                starts_at = datetime.fromisoformat(start).replace(tzinfo=timezone.utc).timestamp() if start else None
+                duration = int(request.form.get('duration', '300'))
+                if not 1 <= duration <= 10080:
+                    raise ValueError('Длительность: от 1 минуты до 7 дней')
+                g.db.execute('UPDATE contests SET title=?,starts_at=?,duration_minutes=? WHERE id=?', (title, starts_at, duration, cid))
+                g.db.commit()
+                flash('Настройки контеста сохранены', 'success')
+                return redirect(url_for('contest', cid=cid))
+            except (ValueError, OverflowError) as exc:
+                flash(str(exc), 'error')
+        start_value = datetime.fromtimestamp(c['starts_at'], timezone.utc).strftime('%Y-%m-%dT%H:%M:%S') if c['starts_at'] is not None else ''
+        return render_template('edit_contest.html', contest=c, start_value=start_value)
+
+    @app.post("/submissions/<int:sid>/moderate")
+    def moderate(sid):
+        admin_only()
+        get_submission(sid)
+        action = request.form.get('action', '')
+        if action not in {'accept', 'ban', 'restore'}:
+            abort(400, 'Неизвестное действие')
+        reason = request.form.get('reason', '').strip()
+        if not reason or len(reason) > 1000:
+            abort(400, 'Укажите причину: от 1 до 1000 символов')
+        g.db.execute('BEGIN IMMEDIATE')
+        row = g.db.execute('SELECT p.manifest FROM submissions s JOIN problems p ON p.id=s.problem_id WHERE s.id=?', (sid,)).fetchone()
+        manifest = json.loads(row['manifest'])
+        verdict = {'accept': 'AC', 'ban': 'BAN', 'restore': None}[action]
+        score = (manifest.get('max_score') or 100) if action == 'accept' else (0 if action == 'ban' else None)
+        g.db.execute('UPDATE submissions SET manual_verdict=?,manual_score=? WHERE id=?', (verdict, score, sid))
+        g.db.execute('INSERT INTO moderation_log(submission_id,admin_id,action,reason,created_at) VALUES(?,?,?,?,?)', (sid, g.user['id'], action, reason, time.time()))
+        g.db.commit()
+        return redirect(url_for('submission', sid=sid))
 
     @app.route("/problems/<int:pid>", methods=["GET", "POST"])
     def problem(pid):
@@ -190,13 +233,14 @@ def create_app(config=None):
         query += " ORDER BY s.id DESC LIMIT 51 OFFSET ?"
         args.append((page - 1) * 50)
         rows = g.db.execute(query, args).fetchall()
-        return render_template("submissions.html", contest=c, rows=rows[:50], more=len(rows) > 50, page=page, tab="submissions")
+        return render_template("submissions.html", contest=c, rows=[effective_submission(row) for row in rows[:50]], more=len(rows) > 50, page=page, tab="submissions")
 
     @app.get("/submissions/<int:sid>")
     def submission(sid):
         s = get_submission(sid)
         tests = g.db.execute("SELECT * FROM test_results WHERE submission_id=? ORDER BY number", (sid,)).fetchall()
-        return render_template("submission.html", submission=s, tests=tests, contest=get_contest(s["contest_id"]), tab="submissions")
+        history = g.db.execute("SELECT m.*,u.username FROM moderation_log m JOIN users u ON u.id=m.admin_id WHERE submission_id=? ORDER BY m.id DESC", (sid,)).fetchall()
+        return render_template("submission.html", submission=s, tests=tests, history=history, contest=get_contest(s["contest_id"]), tab="submissions")
 
     @app.get("/api/submissions/<int:sid>")
     def submission_status(sid):

@@ -180,7 +180,10 @@ class PreparationTests(unittest.TestCase):
 
     def test_migration_preserves_old_rows_and_is_idempotent(self):
         self.con.execute('ALTER TABLE submissions DROP COLUMN score')
+        self.con.execute('ALTER TABLE submissions DROP COLUMN manual_verdict')
+        self.con.execute('ALTER TABLE submissions DROP COLUMN manual_score')
         self.con.commit()
         initialize(self.root)
         initialize(self.root)
-        self.assertIn('score', [r[1] for r in self.con.execute('PRAGMA table_info(submissions)')])
+        columns = {r[1] for r in self.con.execute('PRAGMA table_info(submissions)')}
+        self.assertTrue({'score', 'manual_verdict', 'manual_score'} <= columns)
