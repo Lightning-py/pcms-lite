@@ -360,6 +360,22 @@ WantedBy=multi-user.target
     run("systemctl", "enable", "--now", "pcms-isolate.service")
 
 
+def configure_reference_access(directory, group_id):
+    """Allow pcms to traverse the config directory and read only runtime profiles."""
+    directory = Path(directory)
+    profile = directory / "reference-languages.json"
+    if directory.is_symlink() or profile.is_symlink():
+        raise RuntimeError("Каталог конфигурации и файл профилей не должны быть symlink")
+    os.chown(directory, 0, group_id)
+    directory.chmod(0o710)
+    if not profile.exists():
+        atomic_write(profile, "{}\n", 0o640)
+    elif not profile.is_file():
+        raise RuntimeError("reference-languages.json должен быть обычным файлом")
+    os.chown(profile, 0, group_id)
+    profile.chmod(0o640)
+
+
 def as_app(release, *args, https=False, capture=False):
     return run("runuser", "-u", "pcms", "--", "env", f"PCMS_DATA={DATA}",
                f"PCMS_ISOLATE={APP}/runtime/isolate", f"PCMS_HTTPS={int(https)}",
@@ -384,6 +400,7 @@ def install(args):
             raise RuntimeError("Существующая учётная запись pcms не принадлежит этой установке")
     except KeyError:
         run("useradd", "--system", "--user-group", "--home-dir", DATA, "--no-create-home", "--shell", "/usr/sbin/nologin", "pcms")
+    configure_reference_access(CONF, grp.getgrnam("pcms").gr_gid)
     run("install", "-d", "-m", "0700", "-o", "pcms", "-g", "pcms", DATA)
     APP.mkdir(exist_ok=True)
     stage("Настройка выделенной песочницы и квот")
@@ -418,6 +435,8 @@ with connect() as c:
     credentials = as_app(release, "-c", admin_script, capture=True)
     if credentials.strip():
         atomic_write(CONF / "admin-credentials", credentials, 0o600)
+    stage("Проверка доступа к языковым профилям от пользователя pcms")
+    as_app(release, "-c", "from judge.preparation import profiles; profiles()")
     stage("Самопроверка isolate")
     as_app(release, "-m", "judge.cli", "doctor")
     stage("Интеграционные тесты: OOM в тесте MLE ожидаем и проверяется")

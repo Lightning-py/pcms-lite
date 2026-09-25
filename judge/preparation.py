@@ -38,8 +38,17 @@ PROFILES = {
 def profiles():
     result = dict(PROFILES)
     config = os.environ.get('PCMS_REFERENCE_PROFILES', '/etc/pcms-lite/reference-languages.json')
-    if Path(config).is_file():
-        result.update(json.loads(Path(config).read_text()))
+    try:
+        overrides = json.loads(Path(config).read_text())
+    except FileNotFoundError:
+        overrides = {}
+    except OSError as exc:
+        raise ValueError(f"Нет доступа к профилям {config}: проверьте права чтения файла и прохода к каталогу для пользователя pcms") from exc
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError(f"Некорректный JSON профилей: {config}") from exc
+    if not isinstance(overrides, dict) or any(not isinstance(value, dict) for value in overrides.values()):
+        raise ValueError(f"Профили {config} должны быть JSON-объектом с объектами настроек языков")
+    result.update(overrides)
     return result
 
 

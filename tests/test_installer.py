@@ -1,10 +1,12 @@
 import argparse
+import os
+from unittest.mock import patch
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from deploy.install import MARKER, check_nginx_domain, nginx_conf, publish_nginx, unit_files, validate_domain, wait_for_site
+from deploy.install import configure_reference_access, MARKER, check_nginx_domain, nginx_conf, publish_nginx, unit_files, validate_domain, wait_for_site
 
 
 class InstallerTests(unittest.TestCase):
@@ -39,6 +41,26 @@ class InstallerTests(unittest.TestCase):
             self.fail_reload = False
             raise subprocess.CalledProcessError(1, args)
         return ""
+
+    def test_reference_access_preserves_profiles_and_private_credentials(self):
+        conf = self.root / 'config'
+        conf.mkdir(mode=0o700)
+        secret = conf / 'admin-credentials'
+        secret.write_text('private-test-password')
+        secret.chmod(0o600)
+        with patch('deploy.install.os.chown') as chown:
+            configure_reference_access(conf, os.getgid())
+            profile = conf / 'reference-languages.json'
+            self.assertEqual(profile.read_text(), '{}\n')
+            profile.write_text('{"custom": {"source": "main.py"}}')
+            configure_reference_access(conf, os.getgid())
+            self.assertIn('custom', profile.read_text())
+            chown.assert_any_call(conf, 0, os.getgid())
+            chown.assert_any_call(profile, 0, os.getgid())
+        self.assertEqual(conf.stat().st_mode & 0o777, 0o710)
+        self.assertEqual(profile.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(secret.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(secret.read_text(), 'private-test-password')
 
     def publish(self):
         return publish_nginx(nginx_conf("judge.example.org"), "judge.example.org", self.site, self.command, self.root / "backups")

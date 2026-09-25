@@ -12,7 +12,7 @@ from werkzeug.datastructures import FileStorage
 from judge.db import initialize, connect, add_user, claim, standings
 from judge.imports import enqueue_import, process_next_import
 from judge.polygon import ImportError, import_archive
-from judge.preparation import build_reference, build_checker, run_checker, reference_language
+from judge.preparation import build_reference, build_checker, run_checker, reference_language, profiles
 from judge.sandbox import Result, LANGUAGES
 from judge.scoring import parse_scoring, calculate_score
 from judge.worker import judge_submission
@@ -94,6 +94,16 @@ class PreparationTests(unittest.TestCase):
         with patch.dict('os.environ', {'PCMS_REFERENCE_PROFILES': str(config)}):
             self.assertEqual(reference_language('custom.language'), 'custom.language')
         self.assertEqual(set(LANGUAGES), {'c', 'cpp', 'python'})
+
+    def test_profile_access_error_is_explicit_not_silently_ignored(self):
+        with patch('judge.preparation.Path.read_text', side_effect=PermissionError('denied')):
+            with self.assertRaisesRegex(ValueError, 'права чтения файла'):
+                profiles()
+        with patch('judge.preparation.Path.read_text', side_effect=FileNotFoundError()):
+            self.assertIn('python.3', profiles())
+        with patch('judge.preparation.Path.read_text', return_value='[]'):
+            with self.assertRaisesRegex(ValueError, 'JSON-объектом'):
+                profiles()
 
     def test_java_renames_public_class_and_never_invokes_host_compiler(self):
         (self.root/'123.java').write_text('public class Example { public static void main(String[] a) {} }')
