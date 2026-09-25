@@ -1,0 +1,2 @@
+{% extends 'base.html' %}{% block content %}<section class="login panel"><h1>Вход в систему</h1><p class="muted">Используйте учётную запись, выданную организатором.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{ session.csrf }}"><label>Логин<input name="username" autocomplete="username" required maxlength="40" autofocus></label><label>Пароль<input name="password" type="password" autocomplete="current-password" required maxlength="256"></label><button type="submit">Войти</button></form></section>{% endblock %}

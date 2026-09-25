@@ -1,0 +1,21 @@
+[Unit]
+Description=PCMS Lite web application
+After=network.target
+
+[Service]
+User=pcms
+Group=pcms
+WorkingDirectory=/opt/pcms-lite
+Environment=PCMS_DATA=/var/lib/pcms-lite
+Environment=PCMS_HTTPS=1
+ExecStart=/opt/pcms-lite/.venv/bin/gunicorn --bind 127.0.0.1:8000 --workers 2 --timeout 180 judge.web:create_app()
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/pcms-lite
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

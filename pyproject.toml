@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcms-lite"
+version = "0.1.0"
+description = "Self-hosted programming judge with Polygon package import"
+requires-python = ">=3.11"
+dependencies = ["Flask>=3.1,<4", "defusedxml>=0.7,<1", "gunicorn>=23,<24"]
+
+[project.scripts]
+pcms = "judge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["judge*"]
+
+[tool.setuptools.package-data]
+judge = ["templates/*.html", "static/*.css", "static/*.js"]

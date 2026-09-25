@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}PCMS Lite{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<script src="{{ url_for('static', filename='status.js') }}" defer></script></head>
+<body><header><a class="brand" href="{{ url_for('index') }}">PCMS <span>Lite</span></a><span class="subtitle">Система проверки решений</span>
+{% if g.user %}<div class="account">{{ g.user.username }}{% if g.user.is_admin %} · <a href="{{ url_for('admin') }}">Администрирование</a>{% endif %}
+<form action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf" value="{{ session.csrf }}"><button class="link" type="submit">Выйти</button></form></div>{% endif %}</header>
+<main>{% if contest is defined %}<div class="contest-heading"><a class="back" href="{{ url_for('index') }}">← Контесты</a><h1>{{ contest.title }}</h1>
+<p class="muted">{% if contest.starts_at is none %}Тренировка · без ограничения времени{% else %}Начало: {{ contest.starts_at|date }} · {{ contest.duration_minutes }} мин · {% if now < contest.starts_at %}Ещё не начался{% elif contest_open(contest) %}Идёт{% else %}Завершён{% endif %}{% endif %}</p></div>
+<nav><a {% if tab == 'problems' %}class="active"{% endif %} href="{{ url_for('contest', cid=contest.id) }}">Задачи</a><a {% if tab == 'submissions' %}class="active"{% endif %} href="{{ url_for('submissions', cid=contest.id) }}">Посылки</a><a {% if tab == 'standings' %}class="active"{% endif %} href="{{ url_for('scoreboard', cid=contest.id) }}">Положение</a></nav>{% endif %}
+{% for category,message in get_flashed_messages(with_categories=true) %}<p class="notice {{ category }}" role="status">{{ message }}</p>{% endfor %}
+{% block content %}{% endblock %}</main><footer>PCMS Lite · C / C++ / Python · Все даты в UTC</footer></body></html>

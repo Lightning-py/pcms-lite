@@ -1,0 +1,21 @@
+[Unit]
+Description=PCMS Lite judge worker %i
+After=isolate.service
+Requires=isolate.service
+
+[Service]
+User=pcms
+Group=pcms
+WorkingDirectory=/opt/pcms-lite
+Environment=PCMS_DATA=/var/lib/pcms-lite
+ExecStart=/opt/pcms-lite/.venv/bin/pcms worker --box-id %i
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0077
+# Do not set NoNewPrivileges, PrivateUsers, or ProtectSystem here:
+# the setuid isolate helper must manage namespaces, mounts and cgroups.
+
+[Install]
+WantedBy=multi-user.target
