@@ -4,7 +4,8 @@ import os
 import secrets
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from flask import Flask, abort, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
@@ -27,11 +28,22 @@ def create_app(config=None):
     app.config.update(DATA=root, SECRET_KEY=secret, MAX_CONTENT_LENGTH=128 * 1024 * 1024,
                       MAX_FORM_MEMORY_SIZE=1024 * 1024, SESSION_COOKIE_HTTPONLY=True,
                       SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=os.environ.get("PCMS_HTTPS") == "1",
-                      PERMANENT_SESSION_LIFETIME=12 * 3600)
+                      PERMANENT_SESSION_LIFETIME=12 * 3600,
+                      TIMEZONE=os.environ.get("PCMS_TIMEZONE", "Europe/Moscow"))
     if config:
         app.config.update(config)
     if not app.config["SECRET_KEY"] or len(app.config["SECRET_KEY"]) < 32:
         raise RuntimeError("Сначала выполните pcms init или задайте PCMS_SECRET длиной минимум 32 символа")
+
+    local_zone = ZoneInfo(app.config['TIMEZONE'])
+
+    def parse_start(value):
+        if not value:
+            return None
+        date = datetime.fromisoformat(value)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=local_zone)
+        return date.timestamp()
 
     @app.before_request
     def before():
@@ -60,11 +72,11 @@ def create_app(config=None):
 
     @app.template_filter("date")
     def date_filter(value):
-        return datetime.fromtimestamp(value, timezone.utc).strftime("%d.%m.%Y %H:%M UTC") if value is not None else "Тренировка"
+        return datetime.fromtimestamp(value, local_zone).strftime("%d.%m.%Y %H:%M %Z") if value is not None else "Тренировка"
 
     @app.context_processor
     def context():
-        return {"languages": LANGUAGES, "now": time.time(), "contest_open": contest_open}
+        return {"languages": LANGUAGES, "now": time.time(), "contest_open": contest_open, "timezone_name": app.config["TIMEZONE"]}
 
     def admin_only():
         if not g.user["is_admin"]:
@@ -147,7 +159,7 @@ def create_app(config=None):
                 if not title or len(title) > 200:
                     raise ValueError('Название: от 1 до 200 символов')
                 start = request.form.get('starts_at', '').strip()
-                starts_at = datetime.fromisoformat(start).replace(tzinfo=timezone.utc).timestamp() if start else None
+                starts_at = parse_start(start)
                 duration = int(request.form.get('duration', '300'))
                 if not 1 <= duration <= 10080:
                     raise ValueError('Длительность: от 1 минуты до 7 дней')
@@ -157,7 +169,7 @@ def create_app(config=None):
                 return redirect(url_for('contest', cid=cid))
             except (ValueError, OverflowError) as exc:
                 flash(str(exc), 'error')
-        start_value = datetime.fromtimestamp(c['starts_at'], timezone.utc).strftime('%Y-%m-%dT%H:%M:%S') if c['starts_at'] is not None else ''
+        start_value = datetime.fromtimestamp(c['starts_at'], local_zone).strftime('%Y-%m-%dT%H:%M:%S') if c['starts_at'] is not None else ''
         return render_template('edit_contest.html', contest=c, start_value=start_value)
 
     @app.post("/submissions/<int:sid>/moderate")
@@ -214,9 +226,11 @@ def create_app(config=None):
     def statement(pid, name):
         p, _ = get_problem(pid)
         manifest = json.loads(p["manifest"])
-        if name not in manifest["public_files"]:
+        pdfs = {s["path"] for s in manifest["statements"] if s["type"] == "application/pdf"}
+        if name not in pdfs:
             abort(404)
-        response = send_file(Path(app.config["DATA"]) / "packages" / p["package_dir"] / name)
+        response = send_file(Path(app.config["DATA"]) / "packages" / p["package_dir"] / name,
+                             mimetype="application/pdf", as_attachment=True, download_name=Path(name).name)
         response.headers["Content-Security-Policy"] = "sandbox; default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
         return response
 
@@ -274,7 +288,7 @@ def create_app(config=None):
                     if not cid and not title:
                         raise ValueError("Введите название нового контеста")
                     start = request.form.get("starts_at", "").strip()
-                    starts_at = datetime.fromisoformat(start).replace(tzinfo=timezone.utc).timestamp() if start else None
+                    starts_at = parse_start(start)
                     duration = int(request.form.get("duration", "300"))
                     if not 1 <= duration <= 10080:
                         raise ValueError("Длительность: от 1 минуты до 7 дней")

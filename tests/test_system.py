@@ -6,6 +6,9 @@ import tempfile
 import time
 import unittest
 import zipfile
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from unittest.mock import patch
 from pathlib import Path
 
 from judge.db import add_user, claim, connect, initialize, standings
@@ -107,7 +110,10 @@ class SystemTest(unittest.TestCase):
         self.assertEqual([r[0] for r in self.con.execute("SELECT label FROM problems ORDER BY id")], ["A", "B"])
 
     def test_submission_auth_csrf_and_private_files(self):
-        cid = self.load()
+        package = problem_zip()
+        with zipfile.ZipFile(io.BytesIO(package)) as z:
+            xml = z.read('problem.xml').decode().replace('</statements>', '<statement language="russian" type="application/pdf" path="statements/russian/problem.pdf"/></statements>')
+        cid = self.load(change_zip(package, {'problem.xml':xml, 'statements/russian/problem.pdf': b'%PDF-1.4\n%%EOF'}))
         pid = self.con.execute("SELECT id FROM problems").fetchone()[0]
         self.assertEqual(self.client.get(f"/problems/{pid}").status_code, 302)
         self.login()
@@ -119,8 +125,15 @@ class SystemTest(unittest.TestCase):
         self.assertEqual(self.client.get(f"/submissions/{sid}").status_code, 200)
         self.assertEqual(self.client.get(f"/api/submissions/{sid}").json["verdict"], "QUEUED")
         self.assertEqual(self.client.get(f"/problems/{pid}/statement/tests/01.a").status_code, 404)
-        statement = self.client.get(f"/problems/{pid}/statement/statements/russian/index.html")
+        self.assertEqual(self.client.get(f"/problems/{pid}/statement/statements/russian/index.html").status_code, 404)
+        page = self.client.get(f'/problems/{pid}').data
+        self.assertNotIn(b'<iframe', page)
+        self.assertNotIn(b'index.html', page)
+        self.assertIn(b'problem.pdf', page)
+        statement = self.client.get(f"/problems/{pid}/statement/statements/russian/problem.pdf")
         self.assertEqual(statement.status_code, 200)
+        self.assertEqual(statement.mimetype, 'application/pdf')
+        self.assertIn('attachment;', statement.headers['Content-Disposition'])
         self.assertIn("sandbox", statement.headers["Content-Security-Policy"])
         statement.close()
         self.login("bob")
@@ -195,6 +208,36 @@ class SystemTest(unittest.TestCase):
         self.assertEqual((result["verdict"], result["test_number"]), ("WA", 1))
         self.assertEqual(len(fake.calls), 4)
         self.assertEqual(self.con.execute("SELECT count(*) FROM test_results").fetchone()[0], 1)
+
+    def test_local_time_edit_and_scheduled_start(self):
+        anchor = int(time.time() // 60) * 60
+        cid = self.load(starts_at=anchor-3600, duration=1)
+        self.login('admin')
+        local = lambda value: datetime.fromtimestamp(value, ZoneInfo('Europe/Moscow')).strftime('%Y-%m-%dT%H:%M')
+        self.post(f'/contests/{cid}/edit', {'title':'Restarted','starts_at':local(anchor),'duration':'60'})
+        self.assertEqual(self.con.execute('SELECT starts_at FROM contests').fetchone()[0], anchor)
+        edit = self.client.get(f'/contests/{cid}/edit').data
+        self.assertIn(local(anchor).encode(), edit)
+        self.assertIn(b'Europe/Moscow', edit)
+        self.assertNotIn(b'data-start-delay', edit)
+        future = anchor+120
+        self.post(f'/contests/{cid}/edit', {'title':'Future','starts_at':local(future),'duration':'60'})
+        self.login()
+        with patch('judge.web.time.time', return_value=anchor+60):
+            self.assertEqual(self.client.get('/problems/1').status_code,403)
+            self.assertIn(b'data-start-delay="60000.0"', self.client.get(f'/contests/{cid}').data)
+        with patch('judge.web.time.time', return_value=future):
+            self.assertEqual(self.client.get('/problems/1').status_code,200)
+            self.assertNotIn(b'data-start-delay', self.client.get(f'/contests/{cid}').data)
+            self.assertEqual(self.post('/problems/1', {'language':'python','source':'print(3)'}).status_code,302)
+
+    def test_web_import_uses_same_local_timezone(self):
+        self.login('admin')
+        self.post('/admin', {'action':'import','title':'Timed','starts_at':'2026-09-25T12:00', 'duration':'60','archive':(io.BytesIO(problem_zip()),'task.zip')})
+        from judge.imports import process_next_import
+        self.assertTrue(process_next_import(self.con,self.root,None,0))
+        timestamp = datetime(2026,9,25,12,tzinfo=ZoneInfo('Europe/Moscow')).timestamp()
+        self.assertEqual(self.con.execute('SELECT starts_at FROM contests').fetchone()[0],timestamp)
 
     def test_append_contest_with_colliding_labels_keeps_existing_problems(self):
         cid = self.load(contest_zip())
