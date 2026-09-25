@@ -156,7 +156,7 @@ def build_checker(sandbox, root, manifest):
         return build_reference(sandbox, root, {'path': manifest['checker'], 'type': manifest['checker_type'],
                                'libraries': manifest['checker_libraries'], 'checker': True}, manifest['headers'])
     result = compile_source(sandbox, 'cpp', (root / manifest['checker']).read_bytes(),
-                            {h: (root / h).read_bytes() for h in manifest['headers']}, manifest['checker'])
+                            {h: (root / h).read_bytes() for h in manifest['headers']}, manifest['checker'], testlib_compat=True)
     check_result(result, 'Компиляция чекера')
     return ['/box/main'], {'main': result.artifact}
 

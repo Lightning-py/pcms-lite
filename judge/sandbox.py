@@ -152,7 +152,7 @@ LANGUAGES = {
 }
 
 
-def compile_source(sandbox, language, source, extra_files=None, source_name=None, standard=None):
+def compile_source(sandbox, language, source, extra_files=None, source_name=None, standard=None, testlib_compat=False):
     lang = LANGUAGES[language]
     name = source_name or lang["source"]
     files = dict(extra_files or {})
@@ -164,6 +164,9 @@ def compile_source(sandbox, language, source, extra_files=None, source_name=None
         return r
     include_dirs = sorted({str(Path(p).parent) for p in files})
     cmd = [lang["compiler"], f"-std={standard or lang['standard']}", "-O2", "-pipe", "-DONLINE_JUDGE", "./" + name, "-o", "main"]
+    # Older Polygon testlib headers use global uint64_t without including stdint.h.
+    if language == "cpp" and testlib_compat:
+        cmd += ["-include", "stdint.h"]
     for path in include_dirs:
         cmd += ["-I", path]
     if language == "c":
