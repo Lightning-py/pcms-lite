@@ -1,4 +1,5 @@
 import argparse
+import fcntl
 import getpass
 import logging
 import os
@@ -45,8 +46,23 @@ def main():
         print("Пользователь создан")
     elif args.command == "import":
         from .polygon import import_archive
-        with connect(root) as con:
-            cid = import_archive(con, root, args.archive, args.contest, args.title)
+        from .sandbox import Isolate
+        with (root / 'worker-997.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            class ImportSandbox:
+                instance = None
+
+                def run(self, *args, **kwargs):
+                    if self.instance is None:
+                        self.instance = Isolate(997)
+                        self.instance.cleanup()
+                        self.instance.check()
+                    return self.instance.run(*args, **kwargs)
+
+            sandbox = ImportSandbox()
+            with connect(root) as con:
+                cid = import_archive(con, root, args.archive, args.contest, args.title,
+                                     sandbox=sandbox, progress=lambda message: print(message, flush=True))
         print(f"Импортирован контест {cid}")
     elif args.command == "serve":
         from .web import create_app

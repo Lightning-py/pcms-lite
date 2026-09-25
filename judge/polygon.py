@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 from defusedxml import ElementTree as ET
 from defusedxml.common import DefusedXmlException
 
+from .scoring import parse_scoring
+
 
 class ImportError(ValueError):
     pass
@@ -109,23 +111,44 @@ def parse_problem(root):
     declared = ts.findall("tests/test")
     if len(declared) != count:
         raise ImportError("test-count не совпадает с количеством элементов test")
-    if ts.find("groups") is not None or any(t.get("group") or t.get("points") for t in declared):
-        raise ImportError("Баллы и группы тестов пока не поддерживаются; нужен формат AC/WA")
     inputs = ts.findtext("input-path-pattern", "")
     answers = ts.findtext("answer-path-pattern", "")
     tests = [{"input": require_file(root, pattern_path(inputs, i)),
-              "answer": require_file(root, pattern_path(answers, i))} for i in range(1, count + 1)]
+              "answer": relative_path(pattern_path(answers, i)),
+              "group": declared[i-1].get("group", ""),
+              "points": declared[i-1].get("points", "0")} for i in range(1, count + 1)]
+    scoring = parse_scoring(ts, tests)
+    if len({t["answer"] for t in tests}) != count or {t["answer"] for t in tests} & {t["input"] for t in tests}:
+        raise ImportError("Пути входов и ответов должны быть различными")
+    missing = [t for t in tests if not (root / t["answer"]).is_file()]
+    reference = None
+    if missing:
+        mains = doc.findall("assets/solutions/solution[@tag='main']/source")
+        if len(mains) != 1:
+            raise ImportError("Нет готовых ответов и единственного эталонного решения main")
+        reference = {"path": require_file(root, mains[0].get("path", "")), "type": mains[0].get("type", "")}
+        from .preparation import reference_language
+        reference_language(reference["type"])
     checker = doc.find("assets/checker")
     if checker is None or checker.get("type") != "testlib":
-        raise ImportError("Требуется чекер типа testlib с исходником C++")
+        raise ImportError("Требуется чекер типа testlib с исходником")
     source = checker.find("source")
-    if source is None or not source.get("type", "").startswith("cpp"):
-        raise ImportError("Чекер должен иметь исходник C++")
+    if source is None:
+        raise ImportError("Чекер должен иметь исходник")
+    from .preparation import reference_language
+    checker_language = reference_language(source.get("type", ""))
+    if checker_language not in {"cpp", "java"}:
+        raise ImportError("Поддерживаются testlib-чекеры C++ и Java")
     checker_path = require_file(root, source.get("path", ""))
     # Headers are compiler inputs, never host-executed files.
     headers = [p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() and p.suffix in {".h", ".hpp"}]
-    if not any(Path(p).name == "testlib.h" for p in headers):
+    if checker_language == "cpp" and not any(Path(p).name == "testlib.h" for p in headers):
         raise ImportError("В пакет необходимо включить testlib.h")
+    checker_libraries = []
+    if checker_language == "java":
+        checker_libraries = [p.relative_to(root).as_posix() for p in root.rglob("testlib4j.jar")]
+        if len(checker_libraries) != 1:
+            raise ImportError("Java-чекеру нужен единственный testlib4j.jar")
     names = doc.findall("names/name")
     name = next((x.get("value") for x in names if x.get("language") == "russian"), None)
     title = name or next((x.get("value") for x in names if x.get("value")), doc.get("short-name", "Задача"))
@@ -157,6 +180,7 @@ def parse_problem(root):
             "revision": doc.get("revision", ""), "time_ms": integer(ts, "time-limit", 1, 60000),
             "memory_kb": (integer(ts, "memory-limit", 1024 * 1024, 2 * 1024**3) + 1023) // 1024,
             "tests": tests, "checker": checker_path, "headers": headers,
+            "reference": reference, "checker_type": source.get("type"), "checker_libraries": checker_libraries, **scoring,
             "statements": statements, "public_files": sorted(public_files), **io_names}
 
 
@@ -168,7 +192,7 @@ def letter(index):
     return result
 
 
-def import_archive(con, data, archive, contest_id=None, title="Импорт Polygon", starts_at=None, duration=300):
+def import_archive(con, data, archive, contest_id=None, title="Импорт Polygon", starts_at=None, duration=300, sandbox=None, progress=None, job_id=None):
     """All-or-nothing DB import; local contest.xml URLs match packaged problem URLs."""
     data = Path(data)
     moved = []
@@ -186,7 +210,12 @@ def import_archive(con, data, archive, contest_id=None, title="Импорт Poly
             roots = sorted(p.parent for p in stage.rglob("problem.xml"))
             if not roots or len(roots) > 100:
                 raise ImportError("Ожидается от 1 до 100 полных пакетов с problem.xml")
-            parsed = [(p, parse_problem(p)) for p in roots]
+            parsed = []
+            for p in roots:
+                try:
+                    parsed.append((p, parse_problem(p)))
+                except ValueError as exc:
+                    raise ImportError(f"{p.name}: {exc}") from exc
             descriptors = list((stage / "outer").rglob("contest.xml"))
             if len(descriptors) > 1:
                 raise ImportError("В архиве несколько contest.xml")
@@ -216,6 +245,14 @@ def import_archive(con, data, archive, contest_id=None, title="Импорт Poly
             labels = [x[0] for x in ordered]
             if len(set(labels)) != len(labels) or any(not re.fullmatch(r"[A-Za-z0-9_-]{1,12}", l) for l in labels):
                 raise ImportError("Некорректные или повторяющиеся обозначения задач")
+            from .preparation import prepare_answers
+            generated_bytes = 0
+            for _, root, manifest in ordered:
+                try:
+                    generated_bytes += prepare_answers(root, manifest, sandbox, progress,
+                                                       2 * 1024**3 - budget.bytes - generated_bytes)
+                except (ValueError, RuntimeError) as exc:
+                    raise ImportError(f"{root.name}: {exc}") from exc
             con.execute("BEGIN IMMEDIATE")
             if contest_id is None:
                 contest_id = con.execute("INSERT INTO contests(title,starts_at,duration_minutes,created_at) VALUES(?,?,?,?)",
@@ -242,6 +279,8 @@ def import_archive(con, data, archive, contest_id=None, title="Импорт Poly
                 shutil.copytree(root, dest)
                 con.execute("INSERT INTO problems(contest_id,label,title,package_dir,manifest) VALUES(?,?,?,?,?)",
                             (contest_id, label, manifest["title"], key, json.dumps(manifest, ensure_ascii=False)))
+            if job_id is not None:
+                con.execute("UPDATE imports SET status='DONE',result_contest=?,message='Готово' WHERE id=?", (contest_id, job_id))
             con.commit()
             return contest_id
     except Exception:

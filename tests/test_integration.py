@@ -13,6 +13,8 @@ from pathlib import Path
 from judge.db import add_user, claim, connect, initialize
 from judge.polygon import import_archive
 from judge.sandbox import Isolate
+from judge.preparation import build_reference
+from test_preparation import reference_package
 from judge.worker import judge_submission
 from tools.make_demo import problem_zip
 
@@ -51,6 +53,25 @@ class IntegrationTest(unittest.TestCase):
 
     def test_python_accepted(self):
         self.submit("python", 'print(sum(map(int,input().split())))', "AC")
+
+    def test_java_reference_compilation_and_execution(self):
+        source = self.root / '123.java'
+        source.write_text('public class Answer { public static void main(String[] args) { System.out.println(42); } }')
+        command, files = build_reference(self.sandbox, self.root, {'type':'java21','path':'123.java'}, [])
+        result = self.sandbox.run(command, files, time_ms=10000, memory_kb=1048576, processes=64)
+        self.assertEqual(result.verdict, 'OK', result.stderr)
+        self.assertEqual(result.stdout.strip(), b'42')
+
+    def test_prepare_missing_python_answers(self):
+        cid = import_archive(self.con, self.root, io.BytesIO(reference_package()), sandbox=self.sandbox)
+        p = self.con.execute('SELECT * FROM problems WHERE contest_id=?', (cid,)).fetchone()
+        self.assertEqual((self.root/'packages'/p['package_dir']/'tests/03.a').read_text().strip(), '2000000000')
+
+    def test_prepare_missing_java_answers(self):
+        source = b'import java.util.*; public class Sum { public static void main(String[] a) { Scanner s=new Scanner(System.in); System.out.println(s.nextLong()+s.nextLong()); } }'
+        cid = import_archive(self.con, self.root, io.BytesIO(reference_package('java11', source)), sandbox=self.sandbox)
+        p = self.con.execute('SELECT * FROM problems WHERE contest_id=?', (cid,)).fetchone()
+        self.assertEqual((self.root/'packages'/p['package_dir']/'tests/03.a').read_text().strip(), '2000000000')
 
     def test_wrong_answer(self):
         self.submit("python", 'print(0)', "WA")

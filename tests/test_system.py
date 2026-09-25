@@ -93,11 +93,11 @@ class SystemTest(unittest.TestCase):
         with self.assertRaises(ImportError):
             self.load(change_zip(problem_zip(), {"problem.xml": '<!DOCTYPE problem [<!ENTITY x SYSTEM "file:///etc/passwd">]><problem>&x;</problem>'}))
 
-    def test_unsupported_interactive_and_groups_rejected(self):
+    def test_unsupported_interactive_and_unknown_groups_rejected(self):
         package = problem_zip()
         with zipfile.ZipFile(io.BytesIO(package)) as z:
             xml = z.read("problem.xml").decode()
-        for altered in [xml.replace("<assets>", "<assets><interactor/>"), xml.replace('<test method="manual"/>', '<test method="manual" group="g1"/>')]:
+        for altered in [xml.replace("<assets>", "<assets><interactor/>"), xml.replace('<test method="manual"/>', '<test method="manual" group="g1"/>').replace('</testset>', '<groups/></testset>')]:
             with self.assertRaises(ImportError):
                 self.load(change_zip(package, {"problem.xml": altered}))
 
@@ -142,6 +142,10 @@ class SystemTest(unittest.TestCase):
         self.assertEqual(self.client.get("/admin").status_code, 200)
         response = self.post("/admin", {"action": "import", "title": "Test contest", "duration": "300", "archive": (io.BytesIO(contest_zip()), "contest.zip")})
         self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.con.execute("SELECT count(*) FROM problems").fetchone()[0], 0)
+        from judge.imports import process_next_import
+        self.assertTrue(process_next_import(self.con, self.root, None, 0))
+        self.assertEqual(self.con.execute("SELECT status FROM imports").fetchone()[0], 'DONE')
         self.assertEqual(self.con.execute("SELECT count(*) FROM problems").fetchone()[0], 2)
         self.post("/admin", {"action": "user", "username": "carol", "password": "another-long-password"})
         self.assertIsNotNone(self.con.execute("SELECT id FROM users WHERE username='carol'").fetchone())

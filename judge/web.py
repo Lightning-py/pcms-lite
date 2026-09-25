@@ -3,7 +3,6 @@ import json
 import os
 import secrets
 import sqlite3
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +11,8 @@ from flask import Flask, abort, flash, g, jsonify, redirect, render_template, re
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .db import add_user, connect, contest_open, data_dir, standings
-from .polygon import ImportError, import_archive
+from .polygon import ImportError
+from .imports import enqueue_import
 from .sandbox import LANGUAGES
 
 DUMMY_PASSWORD_HASH = generate_password_hash("not-a-real-password")
@@ -201,7 +201,7 @@ def create_app(config=None):
     @app.get("/api/submissions/<int:sid>")
     def submission_status(sid):
         s = get_submission(sid)
-        return jsonify({k: s[k] for k in ("id", "verdict", "test_number", "time_ms", "memory_kb")})
+        return jsonify({k: s[k] for k in ("id", "verdict", "test_number", "time_ms", "memory_kb", "score")})
 
     @app.get("/contests/<int:cid>/standings")
     def scoreboard(cid):
@@ -209,7 +209,7 @@ def create_app(config=None):
         if c["starts_at"] is not None and c["starts_at"] > time.time() and not g.user["is_admin"]:
             return redirect(url_for("contest", cid=cid))
         problems, people = standings(g.db, c)
-        return render_template("standings.html", contest=c, problems=problems, people=people, tab="standings")
+        return render_template("standings.html", contest=c, problems=problems, people=people, scored=any(json.loads(p["manifest"]).get("scoring") == "points" for p in problems), tab="standings")
 
     @app.route("/admin", methods=["GET", "POST"])
     def admin():
@@ -234,12 +234,11 @@ def create_app(config=None):
                     duration = int(request.form.get("duration", "300"))
                     if not 1 <= duration <= 10080:
                         raise ValueError("Длительность: от 1 минуты до 7 дней")
-                    with tempfile.TemporaryDirectory(prefix="pcms-upload-") as td:
-                        path = Path(td) / "package.zip"
-                        upload.save(path)
-                        cid = import_archive(g.db, app.config["DATA"], path, int(cid) if cid else None, title, starts_at, duration)
-                    flash("Задачи импортированы", "success")
-                    return redirect(url_for("contest", cid=cid))
+                    job = enqueue_import(g.db, app.config["DATA"], upload,
+                                         contest_id=int(cid) if cid else None, title=title,
+                                         starts_at=starts_at, duration=duration)
+                    flash(f"Импорт #{job} поставлен в очередь. Статус подготовки — ниже.", "success")
+                    return redirect(url_for("admin"))
                 else:
                     abort(400)
             except (ValueError, ImportError, sqlite3.IntegrityError) as exc:
@@ -247,7 +246,8 @@ def create_app(config=None):
                 flash("Логин уже существует" if isinstance(exc, sqlite3.IntegrityError) else str(exc), "error")
             return redirect(url_for("admin"))
         return render_template("admin.html", contests=g.db.execute("SELECT * FROM contests ORDER BY id DESC").fetchall(),
-                               users=g.db.execute("SELECT username,is_admin FROM users ORDER BY username").fetchall())
+                               users=g.db.execute("SELECT username,is_admin FROM users ORDER BY username").fetchall(),
+                               imports=g.db.execute("SELECT * FROM imports ORDER BY id DESC LIMIT 30").fetchall())
 
     @app.post("/submissions/<int:sid>/rejudge")
     def rejudge(sid):
@@ -259,7 +259,7 @@ def create_app(config=None):
             g.db.rollback()
             abort(409, "Решение уже проверяется")
         g.db.execute("DELETE FROM test_results WHERE submission_id=?", (sid,))
-        g.db.execute("UPDATE submissions SET verdict='QUEUED',claimed_by=NULL,finished_at=NULL,test_number=NULL,time_ms=NULL,memory_kb=NULL,compile_log='',internal_log='' WHERE id=?", (sid,))
+        g.db.execute("UPDATE submissions SET verdict='QUEUED',claimed_by=NULL,finished_at=NULL,test_number=NULL,time_ms=NULL,memory_kb=NULL,compile_log='',internal_log='',score=NULL WHERE id=?", (sid,))
         g.db.commit()
         return redirect(url_for("submission", sid=sid))
 

@@ -377,7 +377,7 @@ def install(args):
     state.setdefault("domain", args.domain)
     atomic_write(state_path, json.dumps(state), 0o600)
     run("apt-get", "update")
-    run("apt-get", "install", "-y", "--no-upgrade", "-o", "Dpkg::Options::=--force-confold", "python3-venv", "build-essential", "pkg-config", "libcap-dev", "libseccomp-dev", "libsystemd-dev", "nginx", "curl", "ca-certificates", "quota", "e2fsprogs", "util-linux")
+    run("apt-get", "install", "-y", "--no-upgrade", "-o", "Dpkg::Options::=--force-confold", "python3-venv", "openjdk-21-jdk-headless", "pypy3", "build-essential", "pkg-config", "libcap-dev", "libseccomp-dev", "libsystemd-dev", "nginx", "curl", "ca-certificates", "quota", "e2fsprogs", "util-linux")
     try:
         user = pwd.getpwnam("pcms")
         if user.pw_dir != str(DATA) or user.pw_shell != "/usr/sbin/nologin":
@@ -394,7 +394,7 @@ def install(args):
     release.chmod(0o755)
     for name in ("judge", "tests", "tools", "examples"):
         shutil.copytree(SOURCE / name, release / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    for name in ("pyproject.toml", "requirements.lock", "README.md", "THIRD_PARTY.md"):
+    for name in ("pyproject.toml", "requirements.lock", "README.md", "THIRD_PARTY.md", "REFERENCE_LANGUAGES.md"):
         shutil.copy2(SOURCE / name, release / name)
     # Source files copied from a root-only upload must still be readable by pcms.
     for path in release.rglob("*"):

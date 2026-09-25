@@ -98,13 +98,17 @@ class Isolate:
             wall = seconds * 3 + 2
             with tempfile.TemporaryDirectory(prefix="pcms-meta-") as td:
                 meta_file = Path(td) / "meta"
+                # Ubuntu OpenJDK links its public runtime configuration into /etc.
+                # Expose only this directory read-only, never all of /etc.
+                java_config = Path('/etc/java-21-openjdk')
+                runtime_dirs = [f'--dir=etc/java-21-openjdk={java_config}'] if java_config.is_dir() else []
                 cmd = self.command(f"--meta={meta_file}", f"--time={seconds}", f"--wall-time={wall}",
                                    f"--cg-mem={memory_kb}", f"--processes={processes}", "--open-files=64",
                                    f"--fsize={OUTPUT_LIMIT // 1024}", "--core=0", "--chdir=/box",
                                    "--stdin=.pcms-input", "--stdout=.pcms-stdout", "--stderr=.pcms-stderr",
                                    "--env=PATH=/usr/bin:/bin", "--env=LANG=C.UTF-8", "--env=HOME=/box",
                                    "--dir=etc=", "--dir=tmp=", "--dir=dev/shm=", "--env=TMPDIR=/box",
-                                   "--run", "--", *argv)
+                                   *runtime_dirs, "--run", "--", *argv)
                 try:
                     run = subprocess.run(cmd, capture_output=True, timeout=wall + 10)
                 except subprocess.TimeoutExpired as exc:
@@ -148,7 +152,7 @@ LANGUAGES = {
 }
 
 
-def compile_source(sandbox, language, source, extra_files=None, source_name=None):
+def compile_source(sandbox, language, source, extra_files=None, source_name=None, standard=None):
     lang = LANGUAGES[language]
     name = source_name or lang["source"]
     files = dict(extra_files or {})
@@ -159,7 +163,7 @@ def compile_source(sandbox, language, source, extra_files=None, source_name=None
         r.artifact = source if r.verdict == "OK" else b""
         return r
     include_dirs = sorted({str(Path(p).parent) for p in files})
-    cmd = [lang["compiler"], f"-std={lang['standard']}", "-O2", "-pipe", "-DONLINE_JUDGE", "./" + name, "-o", "main"]
+    cmd = [lang["compiler"], f"-std={standard or lang['standard']}", "-O2", "-pipe", "-DONLINE_JUDGE", "./" + name, "-o", "main"]
     for path in include_dirs:
         cmd += ["-I", path]
     if language == "c":

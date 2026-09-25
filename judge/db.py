@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sqlite3
@@ -38,6 +39,11 @@ CREATE TABLE IF NOT EXISTS test_results (
  time_ms INTEGER NOT NULL, memory_kb INTEGER NOT NULL,
  PRIMARY KEY(submission_id, number)
 );
+CREATE TABLE IF NOT EXISTS imports (
+ id INTEGER PRIMARY KEY, archive TEXT NOT NULL, options TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'QUEUED', claimed_by INTEGER,
+ message TEXT NOT NULL DEFAULT '', result_contest INTEGER, created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS login_attempts (
  address TEXT PRIMARY KEY, window_start REAL NOT NULL, count INTEGER NOT NULL
 );
@@ -61,6 +67,8 @@ def initialize(root=None):
     (root / "packages").mkdir(exist_ok=True)
     with connect(root) as con:
         con.executescript(SCHEMA)
+        if 'score' not in {r[1] for r in con.execute('PRAGMA table_info(submissions)')}:
+            con.execute('ALTER TABLE submissions ADD COLUMN score REAL')
 
 
 def add_user(con, username, password, admin=False):
@@ -96,6 +104,21 @@ def standings(con, contest):
     rows = con.execute("""SELECT s.*, u.username FROM submissions s
         JOIN users u ON u.id=s.user_id JOIN problems p ON p.id=s.problem_id
         WHERE p.contest_id=? AND u.is_admin=0 ORDER BY s.created_at,s.id""", (contest["id"],)).fetchall()
+    scored = any(json.loads(p['manifest']).get('scoring') == 'points' for p in problems)
+    if scored:
+        people = {}
+        maxima = {p['id']: json.loads(p['manifest']).get('max_score') or 100 for p in problems}
+        for s in rows:
+            if contest['starts_at'] is not None and not contest_open(contest, s['created_at']):
+                continue
+            person = people.setdefault(s['user_id'], {'username': s['username'], 'score': 0, 'cells': {}})
+            cell = person['cells'].setdefault(s['problem_id'], {'score': 0})
+            value = s['score'] if s['score'] is not None else (maxima[s['problem_id']] if s['verdict'] == 'AC' else 0)
+            if s['verdict'] not in {'JE', 'RUNNING', 'QUEUED'}:
+                cell['score'] = max(cell['score'], value)
+        for person in people.values():
+            person['score'] = sum(cell['score'] for cell in person['cells'].values())
+        return problems, sorted(people.values(), key=lambda p: (-p['score'], p['username']))
     people = {}
     for s in rows:
         if contest["starts_at"] is not None and not contest_open(contest, s["created_at"]):
