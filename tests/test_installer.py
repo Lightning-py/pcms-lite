@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deploy.install import MARKER, check_nginx_domain, nginx_conf, publish_nginx, unit_files, validate_domain
+from deploy.install import MARKER, check_nginx_domain, nginx_conf, publish_nginx, unit_files, validate_domain, wait_for_site
 
 
 class InstallerTests(unittest.TestCase):
@@ -97,6 +97,32 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("/etc/letsencrypt/live/pcms-lite/fullchain.pem", tls)
         self.assertIn("/.well-known/acme-challenge/", tls)
         self.assertNotIn("default_server", tls)
+
+    def test_readiness_waits_for_old_site_and_transient_502(self):
+        replies = iter(["Welcome to nginx", subprocess.CalledProcessError(22, "curl", stderr="HTTP 502"), "Система проверки решений"])
+        sleeps = []
+        def probe(*args, **kwargs):
+            self.assertIn("--noproxy", args)
+            self.assertIn("judge.example.org:80:127.0.0.1", args)
+            value = next(replies)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        wait_for_site("judge.example.org", command=probe, sleep=sleeps.append, attempts=3)
+        self.assertEqual(sleeps, [1, 1])
+
+    def test_readiness_reports_last_curl_error(self):
+        def probe(*args, **kwargs):
+            raise subprocess.CalledProcessError(7, "curl", stderr="Connection refused")
+        with self.assertRaisesRegex(RuntimeError, "Connection refused"):
+            wait_for_site("judge.example.org", command=probe, sleep=lambda _: None, attempts=2)
+
+    def test_https_readiness_rejects_wrong_site(self):
+        def probe(*args, **kwargs):
+            self.assertIn("judge.example.org:443:127.0.0.1", args)
+            return "some other login page"
+        with self.assertRaisesRegex(RuntimeError, "другого сайта"):
+            wait_for_site("judge.example.org", tls=True, command=probe, sleep=lambda _: None, attempts=2)
 
     def test_services_use_socket_and_dedicated_sandbox(self):
         units = unit_files(True, 1)

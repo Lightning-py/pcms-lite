@@ -40,6 +40,50 @@ def run(*args, capture=False, **kwargs):
     return result.stdout if capture else ""
 
 
+CURRENT_STAGE = "начальные проверки"
+
+
+def stage(message):
+    global CURRENT_STAGE
+    CURRENT_STAGE = message
+    print(f"\n[PCMS] {message}", flush=True)
+
+
+def wait_for_site(domain, tls=False, command=run, sleep=time.sleep, attempts=20):
+    """Reload signals are asynchronous: wait for the new site, not just HTTP 200."""
+    scheme, port = ("https", 443) if tls else ("http", 80)
+    last_error = "ответ не получен"
+    for attempt in range(attempts):
+        try:
+            page = command("curl", "--noproxy", "*", "--fail", "--silent", "--show-error",
+                           "--max-time", "3", "--resolve", f"{domain}:{port}:127.0.0.1",
+                           f"{scheme}://{domain}/login", capture=True)
+            if "Система проверки решений" in page:
+                return
+            last_error = "nginx вернул страницу другого сайта вместо страницы входа PCMS"
+        except subprocess.CalledProcessError as exc:
+            last_error = (exc.stderr or f"curl завершился с кодом {exc.returncode}").strip()[:2000]
+        if attempt + 1 < attempts:
+            sleep(1)
+    raise RuntimeError(f"Не дождались PCMS через nginx ({scheme}://{domain}/login). Последний результат: {last_error}")
+
+
+def report_socket_errors(path=Path("/var/log/nginx/error.log")):
+    # Only our upstream, bounded tail, before rollback removes the running service.
+    try:
+        with path.open("rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - 65536))
+            lines = log.read().decode(errors="replace").splitlines()
+        own = [line for line in lines if "/run/pcms-lite/web.sock" in line][-5:]
+        if own:
+            print("[PCMS] Последние ошибки нашего upstream в nginx:", file=sys.stderr)
+            for line in own:
+                print(line, file=sys.stderr)
+    except OSError:
+        pass
+
+
 def atomic_write(path, text, mode=0o644):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -323,6 +367,7 @@ def as_app(release, *args, https=False, capture=False):
 
 
 def install(args):
+    stage("Проверка сервера и существующей конфигурации")
     preflight(args)
     CONF.mkdir(mode=0o700, exist_ok=True)
     state_path = CONF / "installer.json"
@@ -341,6 +386,7 @@ def install(args):
         run("useradd", "--system", "--user-group", "--home-dir", DATA, "--no-create-home", "--shell", "/usr/sbin/nologin", "pcms")
     run("install", "-d", "-m", "0700", "-o", "pcms", "-g", "pcms", DATA)
     APP.mkdir(exist_ok=True)
+    stage("Настройка выделенной песочницы и квот")
     sandbox_setup(args)
     stamp = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
     release = APP / "releases" / stamp
@@ -372,7 +418,9 @@ with connect() as c:
     credentials = as_app(release, "-c", admin_script, capture=True)
     if credentials.strip():
         atomic_write(CONF / "admin-credentials", credentials, 0o600)
+    stage("Самопроверка isolate")
     as_app(release, "-m", "judge.cli", "doctor")
+    stage("Интеграционные тесты: OOM в тесте MLE ожидаем и проверяется")
     # Real compilation, runtime and isolation tests must pass before publishing.
     run("runuser", "-u", "pcms", "--", "env", "PCMS_INTEGRATION=1", f"PCMS_ISOLATE={APP}/runtime/isolate",
         release / ".venv/bin/python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_integration.py", "-v", cwd=release)
@@ -407,26 +455,27 @@ with connect() as c:
         run("systemctl", "daemon-reload")
         active = ["pcms-web.service"] + [f"pcms-worker@{i}.service" for i in range(args.workers)]
         run("systemctl", "enable", *active)
+        stage("Запуск web/worker и проверка Unix-сокета")
         run("systemctl", "restart", *active)
         for _ in range(30):
             try:
-                run("curl", "--fail", "--silent", "--max-time", "2", "--unix-socket", "/run/pcms-lite/web.sock", "http://localhost/login", capture=True)
+                run("curl", "--noproxy", "*", "--fail", "--silent", "--show-error", "--max-time", "2", "--unix-socket", "/run/pcms-lite/web.sock", "http://localhost/login", capture=True)
                 break
             except subprocess.CalledProcessError:
                 time.sleep(1)
         else:
             raise RuntimeError("Веб-служба не прошла проверку готовности")
         run("systemctl", "is-active", *active)
+        stage("Подключение сайта nginx")
         run("systemctl", "enable", "--now", "nginx")
         publish_nginx(nginx_conf(args.domain, https), args.domain, backup_dir=backup)
         published = True
-        port = 443 if https else 80
-        scheme = "https" if https else "http"
-        page = run("curl", "--noproxy", "*", "--fail", "--silent", "--max-time", "15", "--resolve", f"{args.domain}:{port}:127.0.0.1", f"{scheme}://{args.domain}/login", capture=True)
-        if "Система проверки решений" not in page:
-            raise RuntimeError("nginx отвечает другим сайтом; конфигурация будет восстановлена")
-    except BaseException:
+        stage("Проверка сайта через nginx после reload")
+        wait_for_site(args.domain, https)
+    except BaseException as exc:
+        print(f"[PCMS] Ошибка на этапе «{CURRENT_STAGE}»: {exc}. Выполняется откат web/worker.", file=sys.stderr, flush=True)
         if published:
+            report_socket_errors()
             if old_site is None:
                 SITE.unlink(missing_ok=True)
             else:
@@ -477,14 +526,8 @@ with connect() as c:
             managed_write(UNITDIR / "pcms-web.service", unit_files(True, args.workers, socket_group)["pcms-web.service"])
             run("systemctl", "daemon-reload")
             run("systemctl", "restart", "pcms-web.service")
-            for attempt in range(15):
-                try:
-                    run("curl", "--noproxy", "*", "--fail", "--silent", "--max-time", "3", "--resolve", f"{args.domain}:443:127.0.0.1", f"https://{args.domain}/login", capture=True)
-                    break
-                except subprocess.CalledProcessError:
-                    if attempt == 14:
-                        raise
-                    time.sleep(1)
+            stage("Проверка сайта через HTTPS")
+            wait_for_site(args.domain, True)
         except BaseException:
             atomic_write(SITE, http_site)
             atomic_write(UNITDIR / "pcms-web.service", http_unit)
@@ -519,7 +562,7 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             install(args)
     except (Exception, KeyboardInterrupt) as exc:
-        print(f"\nУстановка остановлена: {exc}", file=sys.stderr)
+        print(f"\nУстановка остановлена на этапе «{CURRENT_STAGE}»: {exc}", file=sys.stderr)
         if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
             print(exc.stderr, file=sys.stderr)
         print("Пакеты ОС, созданные данные и образ песочниц сохранены. Исправьте причину и повторите запуск. Журналы: journalctl -u pcms-web -u pcms-worker@0 -u pcms-isolate", file=sys.stderr)
